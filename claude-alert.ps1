@@ -6,12 +6,35 @@ Add-Type -AssemblyName PresentationCore
 Add-Type -AssemblyName WindowsBase
 Add-Type -AssemblyName System.Windows.Forms
 
-# --- Play a subtle notification tone ---
-# Generate a short, gentle two-tone chime using console beep in background
+# --- Play a quiet notification tone via WAV (respects system volume) ---
 $beepJob = Start-Job -ScriptBlock {
-    [Console]::Beep(880, 120)   # A5 - short
-    Start-Sleep -Milliseconds 80
-    [Console]::Beep(1320, 150)  # E6 - slightly longer
+    $sampleRate = 22050
+    $duration = 0.08          # 80ms total
+    $freq = 880               # A5
+    $amplitude = 800          # very quiet (max ~32767)
+    $samples = [int]($sampleRate * $duration)
+    $ms = New-Object System.IO.MemoryStream
+    $bw = New-Object System.IO.BinaryWriter($ms)
+    # WAV header
+    $dataSize = $samples * 2
+    $bw.Write([System.Text.Encoding]::ASCII.GetBytes('RIFF'))
+    $bw.Write([int](36 + $dataSize))
+    $bw.Write([System.Text.Encoding]::ASCII.GetBytes('WAVEfmt '))
+    $bw.Write([int]16); $bw.Write([int16]1); $bw.Write([int16]1)
+    $bw.Write([int]$sampleRate); $bw.Write([int]($sampleRate*2))
+    $bw.Write([int16]2); $bw.Write([int16]16)
+    $bw.Write([System.Text.Encoding]::ASCII.GetBytes('data'))
+    $bw.Write([int]$dataSize)
+    for ($i = 0; $i -lt $samples; $i++) {
+        $t = $i / $sampleRate
+        $envelope = 1.0 - ($i / $samples)  # fade out
+        $val = [int16]($amplitude * $envelope * [Math]::Sin(2 * [Math]::PI * $freq * $t))
+        $bw.Write($val)
+    }
+    $ms.Position = 0
+    $player = New-Object System.Media.SoundPlayer($ms)
+    $player.PlaySync()
+    $bw.Dispose(); $ms.Dispose()
 }
 
 # --- Flash edges on ALL monitors ---

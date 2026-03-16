@@ -1,4 +1,4 @@
 #!/bin/bash
 # Claude Alert hook wrapper - launches the PowerShell alert script
-# Runs detached so it doesn't block Claude's hook timeout
-powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "C:/git/tools/Claude-Alert/claude-alert.ps1" &
+# Uses Start-Process to fully detach so it survives parent shell exit
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Start-Process powershell.exe -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File','C:/git/tools/Claude-Alert/claude-alert.ps1' -WindowStyle Hidden"

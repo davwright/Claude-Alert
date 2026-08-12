@@ -201,9 +201,36 @@ internal static class TranscriptPeek
 
                         // Event: a queue-operation whose content is the <task-notification>.
                         // "...<task-id>bc66xiqcd</task-id>...<event>tick 5</event>..."
+                        //
+                        // Only ids we saw armed count. Monitors are not the only thing that
+                        // emits <task-notification> — a run_in_background Bash task emits one
+                        // too, with a different shape (<tool-use-id>, <output-file>,
+                        // <status>completed</status>, and NO <event>). Keying off the id alone
+                        // inserted those as unarmed-and-never-terminal, so one finished
+                        // background command pinned the session "monitoring" until it scrolled
+                        // out of the scan window — which for an idle session is never. Bash
+                        // background work is already covered deterministically by the Stop
+                        // payload's background_tasks; this scan is only about monitors.
                         string? evtId = ExtractBetween(content, "<task-id>", "</task-id>");
-                        if (evtId == null) continue;
-                        string evtText = ExtractBetween(content, "<event>", "</event>") ?? "";
+                        if (evtId == null || !armed.ContainsKey(evtId)) continue;
+
+                        // The task wrapper's own completion notification — <status>completed</status>
+                        // alongside <tool-use-id>/<output-file>, and no <event>. A monitor emits
+                        // this when it finishes, so it's the authoritative terminal signal; match
+                        // it against the same tokens so a non-terminal status stays live.
+                        string? status = ExtractBetween(content, "<status>", "</status>");
+                        if (status != null)
+                        {
+                            armed[evtId] = MonitorDoneTokens.Any(
+                                t => status.Contains(t, StringComparison.OrdinalIgnoreCase));
+                            continue;
+                        }
+
+                        // No <event> and no <status> means this notification carries no liveness
+                        // information. Leave the id's state alone — treating absence as "still
+                        // running" is what pinned finished monitors live forever.
+                        string? evtText = ExtractBetween(content, "<event>", "</event>");
+                        if (evtText == null) continue;
                         armed[evtId] = MonitorDoneTokens.Any(
                             t => evtText.Contains(t, StringComparison.OrdinalIgnoreCase));
                     }

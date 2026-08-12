@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO.Pipes;
+using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -16,6 +17,14 @@ internal static partial class Program
         Path.Combine(Environment.GetEnvironmentVariable("TEMP") ?? Path.GetTempPath(), "claude-alert");
 
     private static readonly string LogPath = Path.Combine(CacheDir, "claudehook.log");
+
+    /// <summary>Commit this binary was built from, plus <c>.dirty</c> when the tree didn't
+    /// match it. Stamped by publish.ps1; release\ is gitignored so this is the only link
+    /// back to source. Logged on every invocation.</summary>
+    private static readonly string BuildStamp =
+        Assembly.GetExecutingAssembly()
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
+            ?.InformationalVersion ?? "unstamped";
     private static readonly long LogRotateBytes = 512 * 1024;   // 512KB cap; older entries discarded.
     private static readonly Stopwatch RunClock = Stopwatch.StartNew();
 
@@ -80,7 +89,7 @@ internal static partial class Program
         try
         {
             Directory.CreateDirectory(CacheDir);
-            Log("START");
+            Log($"START {BuildStamp}");
 
             // --from-pid <N> — bash hands us its parent's PID (claude.exe).
             // We walk from there to find Code.exe. The Claude process is alive for
@@ -115,7 +124,10 @@ internal static partial class Program
                 return 0;
             }
 
-            if (internalKind == "busy" && IsBusyDebounced(hook.SessionId))
+            // PostToolUse is exempt: it is the only event that tells DN a permission prompt
+            // was answered, and with parallel tools two can land inside the 1s window. Losing
+            // one to the debounce would strand the desktop yellow for the rest of the turn.
+            if (internalKind == "busy" && hook.HookEventName != "PostToolUse" && IsBusyDebounced(hook.SessionId))
             {
                 Log("EXIT busy-debounced");
                 return 0;
@@ -131,6 +143,17 @@ internal static partial class Program
             // colour "Stop ending with a question" differently from "clean Stop". On
             // schema break, pop a one-shot Windows toast per session (the heuristic
             // depends on Claude's transcript format which isn't a stable contract).
+            // Monitor liveness is tracked in a sidecar rather than rediscovered from the
+            // transcript on every Stop: a Monitor's arm line scrolls out of any fixed window
+            // long before the watcher finishes. Arm here, expire at Stop, drop at SessionEnd.
+            if (hook.HookEventName == "PostToolUse" && hook.ToolName == "Monitor")
+            {
+                TranscriptPeek.ArmMonitor(CacheDir, hook.SessionId, hook.ToolResponse?.ToString());
+                Log("  monitor armed");
+            }
+            if (hook.HookEventName == "SessionEnd")
+                TranscriptPeek.ClearMonitors(CacheDir, hook.SessionId);
+
             bool? endsWithQuestion = null;
             string? messageTail = null;
             bool backgroundActive = false;
@@ -156,7 +179,7 @@ internal static partial class Program
                 // Either means DN should keep the desktop orange (working), not green (done).
                 bool bashBackground = hook.BackgroundTasks is { ValueKind: JsonValueKind.Array } bt
                                       && bt.GetArrayLength() > 0;
-                bool liveMonitor = TranscriptPeek.HasLiveMonitor(hook.TranscriptPath);
+                bool liveMonitor = TranscriptPeek.HasLiveMonitor(CacheDir, hook.SessionId, hook.TranscriptPath);
                 backgroundActive = bashBackground || liveMonitor;
                 if (backgroundActive)
                     Log($"  backgroundActive=true (bashTasks={bashBackground} liveMonitor={liveMonitor})");
@@ -166,8 +189,12 @@ internal static partial class Program
             // fires right after PreToolUse for the same tool; without this it would clobber the
             // PreToolUse hover with a generic "Waiting for input". Same tool_input shape, so the
             // same builder applies — keeps the hover on e.g. Ask "Verify Channel".
+            //
+            // PostToolUse carries the same tool_input, and that matters beyond the hover:
+            // PermissionRequest has no tool_use_id, so (toolName, toolDescription) is the only
+            // handle DN has for deciding which completed tool answered which pending prompt.
             string? toolDescription = null;
-            if (hook.HookEventName is "PreToolUse" or "PermissionRequest")
+            if (hook.HookEventName is "PreToolUse" or "PermissionRequest" or "PostToolUse")
             {
                 toolDescription = BuildToolDescription(hook);
             }
@@ -251,6 +278,7 @@ internal static partial class Program
         [JsonPropertyName("tool_name")]       public string? ToolName { get; set; }
         [JsonPropertyName("source")]          public string? Source { get; set; }   // SessionStart: startup/resume/clear
         [JsonPropertyName("tool_input")]      public JsonElement? ToolInput { get; set; }  // PreToolUse: raw tool input JSON
+        [JsonPropertyName("tool_response")]   public JsonElement? ToolResponse { get; set; } // PostToolUse: what the tool returned
 
         // Stop only: run_in_background Bash shells still alive at turn end. Note this does
         // NOT include Monitor watchers (verified empirically) — those are detected via the
@@ -307,6 +335,7 @@ internal static partial class Program
         "SessionStart"      => "busy",
         "UserPromptSubmit"  => "busy",
         "PreToolUse"        => "busy",
+        "PostToolUse"       => "busy",   // also DN's "the permission prompt was answered" signal
         "PermissionRequest" => "asking",  // inline y/n dialog — Claude is blocked on user
         "Notification"      => "asking",  // both permission_prompt and idle_prompt — user is being waited on
         "Stop"              => "ready",

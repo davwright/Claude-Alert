@@ -45,12 +45,18 @@ internal static class TranscriptPeek
     private const int MaxLinesToScan = 30;
 
     /// <summary>
-    /// Wider window for the monitor-liveness scan. A Monitor emits one task-notification
-    /// per event (a build watch can tick dozens of times), so the "Monitor started" arm
-    /// can be far behind the current tail. 400 lines covers a long-running watch without
-    /// reading the whole (MB-scale) transcript.
+    /// Window for the monitor terminal-evidence scan. This no longer bounds correctness:
+    /// arms come from the sidecar (see <see cref="ArmMonitor"/>), so a monitor whose arm
+    /// has scrolled far out of reach is still known. The scan only looks for the
+    /// completion of an id we already know about; missing it costs a late clear, which
+    /// the declared-timeout expiry then bounds.
     /// </summary>
     private const int MaxLinesForMonitorScan = 400;
+
+    /// <summary>Grace added to a monitor's own declared timeout before we consider a
+    /// still-armed entry dead. Covers the gap between the watcher expiring and its final
+    /// notification landing.</summary>
+    private static readonly TimeSpan ExpiryGrace = TimeSpan.FromMinutes(1);
 
     /// <summary>Max length we'll return as the "tail" of the last message.</summary>
     public const int MaxTailLength = 200;
@@ -152,95 +158,156 @@ internal static class TranscriptPeek
     }
 
     /// <summary>
-    /// Scans the transcript tail for a Monitor watcher that is still live at this Stop.
+    /// Records that a Monitor was armed, from the PostToolUse tool_response text
+    /// ("Monitor started (task bc66xiqcd, timeout 70000ms)."). Called on every
+    /// PostToolUse for the Monitor tool; a response without that marker is ignored.
+    ///
+    /// This is the fix for the window problem: the arm is remembered in a sidecar
+    /// keyed by session, so it survives however much transcript is written afterwards.
+    /// The transcript is then only consulted for the *completion* of an id we already
+    /// know about (see <see cref="HasLiveMonitor"/>).
+    /// </summary>
+    public static void ArmMonitor(string cacheDir, string? sessionId, string? toolResponse)
+    {
+        if (string.IsNullOrEmpty(sessionId) || string.IsNullOrEmpty(toolResponse)) return;
+        string? id = ExtractAfter(toolResponse!, "Monitor started (task ", ',');
+        if (id == null) return;
+
+        // "…, timeout 600000ms)" — the monitor's own declared lifetime, used as the
+        // backstop so a watcher that dies without a final notification can't pin the
+        // session busy forever.
+        long timeoutMs = 0;
+        string? t = ExtractAfter(toolResponse!, "timeout ", 'm');
+        if (t != null) long.TryParse(t.Trim(), out timeoutMs);
+
+        try
+        {
+            var armed = LoadArmed(cacheDir, sessionId!);
+            armed[id] = new ArmedMonitor { ArmedUtc = DateTime.UtcNow, TimeoutMs = timeoutMs };
+            SaveArmed(cacheDir, sessionId!, armed);
+        }
+        catch { /* liveness is best-effort; never break the hook */ }
+    }
+
+    /// <summary>Drop a session's armed-monitor sidecar (SessionEnd).</summary>
+    public static void ClearMonitors(string cacheDir, string? sessionId)
+    {
+        if (string.IsNullOrEmpty(sessionId)) return;
+        try { File.Delete(ArmedPath(cacheDir, sessionId!)); } catch { }
+    }
+
+    /// <summary>
+    /// True when a Monitor watcher armed by this session is still running at this Stop.
     ///
     /// Why this exists: a Monitor tool call returns immediately ("Keep working"), so the
     /// turn ends and Stop fires — painting the desktop green — while the watcher runs on
     /// in the background. Monitors are NOT in the Stop payload's `background_tasks` array
-    /// (that only tracks run_in_background Bash), so the transcript is the only signal.
+    /// (that only tracks run_in_background Bash), so they need their own signal.
     ///
-    /// A monitor id is live if we saw its "Monitor started (task &lt;id&gt;" arm and its most
-    /// recent task-notification event is not a completion (see <see cref="MonitorDoneTokens"/>).
-    /// Both the arm and the per-event notifications land as tool_result items inside
-    /// type:"user" lines; we match on the content string.
-    ///
-    /// Returns true if at least one armed monitor has no terminal event yet.
+    /// An id is dropped when any of these says it's over:
+    ///   - a terminal task-notification in the transcript tail (<c>&lt;status&gt;</c> or
+    ///     <c>&lt;event&gt;</c> matching <see cref="MonitorDoneTokens"/>),
+    ///   - its own declared timeout plus <see cref="ExpiryGrace"/> has elapsed.
+    /// Terminal evidence is sticky: a monitor that reported completion does not resume,
+    /// and a re-armed watcher gets a fresh harness id (and a fresh sidecar entry).
     /// </summary>
-    public static bool HasLiveMonitor(string? transcriptPath)
+    public static bool HasLiveMonitor(string cacheDir, string? sessionId, string? transcriptPath)
     {
-        if (string.IsNullOrEmpty(transcriptPath) || !File.Exists(transcriptPath))
-            return false;
+        if (string.IsNullOrEmpty(sessionId)) return false;
 
         try
         {
-            var tail = ReadLastLines(transcriptPath, MaxLinesForMonitorScan);
+            var armed = LoadArmed(cacheDir, sessionId!);
+            if (armed.Count == 0) return false;
 
-            // task-id → seen-a-terminal-event-since-arm. We walk oldest→newest so the
-            // last write per id wins: arm sets false, a terminal event sets true, a
-            // non-terminal event resets to false (a re-armed id, or just a fresh tick).
-            var armed = new Dictionary<string, bool>(StringComparer.Ordinal);
-
-            foreach (string line in tail)
+            var now = DateTime.UtcNow;
+            foreach (var (id, m) in armed.ToList())
             {
-                if (string.IsNullOrWhiteSpace(line)) continue;
-                if (!line.Contains("Monitor started (task", StringComparison.Ordinal) &&
-                    !line.Contains("task-notification", StringComparison.Ordinal))
-                    continue;   // cheap reject before parsing
-
-                JsonDocument? doc = null;
-                try { doc = JsonDocument.Parse(line); } catch { continue; }
-                using (doc)
-                {
-                    foreach (string content in MonitorTexts(doc.RootElement))
-                    {
-                        // Arm: "Monitor started (task bc66xiqcd, timeout 70000ms)..."
-                        // Only counts inside a tool_result (the genuine arm) — MonitorTexts
-                        // yields those; assistant text quoting the phrase is not yielded.
-                        string? armId = ExtractAfter(content, "Monitor started (task ", ',');
-                        if (armId != null) { armed[armId] = false; continue; }
-
-                        // Event: a queue-operation whose content is the <task-notification>.
-                        // "...<task-id>bc66xiqcd</task-id>...<event>tick 5</event>..."
-                        //
-                        // Only ids we saw armed count. Monitors are not the only thing that
-                        // emits <task-notification> — a run_in_background Bash task emits one
-                        // too, with a different shape (<tool-use-id>, <output-file>,
-                        // <status>completed</status>, and NO <event>). Keying off the id alone
-                        // inserted those as unarmed-and-never-terminal, so one finished
-                        // background command pinned the session "monitoring" until it scrolled
-                        // out of the scan window — which for an idle session is never. Bash
-                        // background work is already covered deterministically by the Stop
-                        // payload's background_tasks; this scan is only about monitors.
-                        string? evtId = ExtractBetween(content, "<task-id>", "</task-id>");
-                        if (evtId == null || !armed.ContainsKey(evtId)) continue;
-
-                        // The task wrapper's own completion notification — <status>completed</status>
-                        // alongside <tool-use-id>/<output-file>, and no <event>. A monitor emits
-                        // this when it finishes, so it's the authoritative terminal signal; match
-                        // it against the same tokens so a non-terminal status stays live.
-                        string? status = ExtractBetween(content, "<status>", "</status>");
-                        if (status != null)
-                        {
-                            armed[evtId] = MonitorDoneTokens.Any(
-                                t => status.Contains(t, StringComparison.OrdinalIgnoreCase));
-                            continue;
-                        }
-
-                        // No <event> and no <status> means this notification carries no liveness
-                        // information. Leave the id's state alone — treating absence as "still
-                        // running" is what pinned finished monitors live forever.
-                        string? evtText = ExtractBetween(content, "<event>", "</event>");
-                        if (evtText == null) continue;
-                        armed[evtId] = MonitorDoneTokens.Any(
-                            t => evtText.Contains(t, StringComparison.OrdinalIgnoreCase));
-                    }
-                }
+                if (m.TimeoutMs > 0 &&
+                    now - m.ArmedUtc > TimeSpan.FromMilliseconds(m.TimeoutMs) + ExpiryGrace)
+                    armed.Remove(id);
             }
 
-            // Live = armed and not yet terminal.
-            return armed.Values.Any(terminal => !terminal);
+            if (armed.Count > 0)
+                foreach (string id in TerminalMonitorIds(transcriptPath, armed.Keys))
+                    armed.Remove(id);
+
+            SaveArmed(cacheDir, sessionId!, armed);
+            return armed.Count > 0;
         }
         catch { return false; }   // never let this break the Stop path
+    }
+
+    /// <summary>
+    /// Ids among <paramref name="ofInterest"/> whose task-notifications in the transcript
+    /// tail show a completion. Only ids we already know were armed are considered — a
+    /// run_in_background Bash task emits the same <c>&lt;task-notification&gt;</c> wrapper.
+    /// </summary>
+    private static IEnumerable<string> TerminalMonitorIds(string? transcriptPath, IEnumerable<string> ofInterest)
+    {
+        var wanted = new HashSet<string>(ofInterest, StringComparer.Ordinal);
+        var done = new HashSet<string>(StringComparer.Ordinal);
+        if (string.IsNullOrEmpty(transcriptPath) || !File.Exists(transcriptPath)) return done;
+
+        foreach (string line in ReadLastLines(transcriptPath!, MaxLinesForMonitorScan))
+        {
+            if (string.IsNullOrWhiteSpace(line)) continue;
+            if (!line.Contains("task-notification", StringComparison.Ordinal)) continue;
+
+            JsonDocument? doc = null;
+            try { doc = JsonDocument.Parse(line); } catch { continue; }
+            using (doc)
+            {
+                foreach (string content in MonitorTexts(doc.RootElement))
+                {
+                    string? id = ExtractBetween(content, "<task-id>", "</task-id>");
+                    if (id == null || !wanted.Contains(id) || done.Contains(id)) continue;
+
+                    // Two shapes carry the outcome: the task wrapper's completion
+                    // notification (<status>completed</status>, no <event>) and a monitor's
+                    // own event text. Either counts; neither present means this notification
+                    // simply carries no liveness information.
+                    string? text = ExtractBetween(content, "<status>", "</status>")
+                                ?? ExtractBetween(content, "<event>", "</event>");
+                    if (text == null) continue;
+                    if (MonitorDoneTokens.Any(tok => text.Contains(tok, StringComparison.OrdinalIgnoreCase)))
+                        done.Add(id);
+                }
+            }
+        }
+        return done;
+    }
+
+    private sealed class ArmedMonitor
+    {
+        public DateTime ArmedUtc { get; set; }
+        public long TimeoutMs { get; set; }
+    }
+
+    private static string ArmedPath(string cacheDir, string sessionId) =>
+        Path.Combine(cacheDir, $"monitors-{sessionId}.json");
+
+    private static Dictionary<string, ArmedMonitor> LoadArmed(string cacheDir, string sessionId)
+    {
+        string path = ArmedPath(cacheDir, sessionId);
+        if (!File.Exists(path)) return new Dictionary<string, ArmedMonitor>(StringComparer.Ordinal);
+        try
+        {
+            return JsonSerializer.Deserialize<Dictionary<string, ArmedMonitor>>(File.ReadAllText(path))
+                   ?? new Dictionary<string, ArmedMonitor>(StringComparer.Ordinal);
+        }
+        catch { return new Dictionary<string, ArmedMonitor>(StringComparer.Ordinal); }
+    }
+
+    private static void SaveArmed(string cacheDir, string sessionId, Dictionary<string, ArmedMonitor> armed)
+    {
+        string path = ArmedPath(cacheDir, sessionId);
+        try
+        {
+            if (armed.Count == 0) { File.Delete(path); return; }
+            File.WriteAllText(path, JsonSerializer.Serialize(armed));
+        }
+        catch { }
     }
 
     /// <summary>

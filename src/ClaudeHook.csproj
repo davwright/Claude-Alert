@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>ClaudeHook</RootNamespace>
+    <AssemblyName>ClaudeHook</AssemblyName>
+    <ApplicationIcon></ApplicationIcon>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Framework-dependent. Requires .NET 8 runtime (already installed alongside DesktopNames). -->
+    <SelfContained>false</SelfContained>
+  </PropertyGroup>
+
+</Project>

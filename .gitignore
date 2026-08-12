@@ -1,0 +1,9 @@
+# Build output
+bin/
+obj/
+
+# Deployed binaries — ClaudeHook.exe is published here by `dotnet publish`, and
+# release/backup-prev/ holds the previous build for rollback. Both are artifacts.
+release/
+
+.vscode/

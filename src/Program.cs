@@ -124,14 +124,38 @@ internal static partial class Program
                 return 0;
             }
 
-            // PostToolUse is exempt: it is the only event that tells DN a permission prompt
-            // was answered, and with parallel tools two can land inside the 1s window. Losing
-            // one to the debounce would strand the desktop yellow for the rest of the turn.
-            if (internalKind == "busy" && hook.HookEventName != "PostToolUse" && IsBusyDebounced(hook.SessionId))
+            // A subagent tool call (agent_id present) is the parent's own work seen from the
+            // inside: the parent already went busy firing PreToolUse for the Agent tool, so
+            // re-announcing every nested call only churns the desktop colour. Anything the
+            // user actually has to answer (PermissionRequest / Notification -> "asking")
+            // still gets through, whoever asked.
+            if (!string.IsNullOrEmpty(hook.AgentId) && internalKind == "busy")
+            {
+                Log($"EXIT subagent busy event (agent={hook.AgentType}/{hook.AgentId})");
+                return 0;
+            }
+
+            // PostToolUse is DN's only "the permission prompt was answered" signal, and with
+            // parallel tools two can land inside the 1s window — losing one would strand the
+            // desktop yellow for the rest of the turn. But that only matters while a prompt is
+            // actually outstanding, which is rare (2 of 1394 events in a day's logs), and a
+            // blanket exemption makes PostToolUse the largest event category by far. So keep
+            // the exemption exactly when it earns its keep: an ask is pending, or this is the
+            // Monitor PostToolUse that arms liveness further down.
+            bool exemptFromDebounce = hook.HookEventName == "PostToolUse"
+                                      && (hook.ToolName == "Monitor" || HasPendingAsk(hook.SessionId));
+            if (internalKind == "busy" && !exemptFromDebounce && IsBusyDebounced(hook.SessionId))
             {
                 Log("EXIT busy-debounced");
                 return 0;
             }
+
+            // Ask lifecycle, updated only for events that actually reached this point: an
+            // asking event raises the flag; the PostToolUse that answers it, or the end of
+            // the turn, lowers it again.
+            if (internalKind == "asking") SetPendingAsk(hook.SessionId, true);
+            else if (hook.HookEventName is "PostToolUse" or "Stop" or "StopFailure" or "SessionEnd")
+                SetPendingAsk(hook.SessionId, false);
 
             // Walk the parent chain. Returns the full chain + an outcome label so
             // DesktopNames knows whether to trust vscodePid or fall back to other
@@ -218,7 +242,7 @@ internal static partial class Program
                 ErrorType        = hook.ErrorType ?? hook.Error ?? hook.Reason,
                 VsCodePid        = vscodePid,
                 SessionPid       = Environment.ProcessId,
-                ParentPid        = fromPid,
+                ParentPid        = LivenessPid(fromPid, walk.Chain),
                 ParentChain      = walk.Chain,
                 WalkOutcome      = walk.Outcome,
                 LastMessageEndsWithQuestion = endsWithQuestion,
@@ -277,6 +301,8 @@ internal static partial class Program
         [JsonPropertyName("message")]         public string? Message { get; set; }
         [JsonPropertyName("tool_name")]       public string? ToolName { get; set; }
         [JsonPropertyName("source")]          public string? Source { get; set; }   // SessionStart: startup/resume/clear
+        [JsonPropertyName("agent_id")]        public string? AgentId { get; set; }   // set only on hooks fired from inside a subagent
+        [JsonPropertyName("agent_type")]      public string? AgentType { get; set; } // e.g. "general-purpose", "Explore"
         [JsonPropertyName("tool_input")]      public JsonElement? ToolInput { get; set; }  // PreToolUse: raw tool input JSON
         [JsonPropertyName("tool_response")]   public JsonElement? ToolResponse { get; set; } // PostToolUse: what the tool returned
 
@@ -330,6 +356,20 @@ internal static partial class Program
     /// This mapping is NOT sent to DesktopNames any more — see the wire schema in
     /// DESKTOPNAMES-INTEGRATION.md. DN keys off `hookEvent` and decides colour itself.
     /// </summary>
+    /// <summary>
+    /// The long-lived pid DesktopNames watches to tell whether a session is still alive.
+    /// claude-alert.sh passes $PPID, but under Git Bash that is MSYS pid 1 — not a real
+    /// Windows process — so DN got no liveness signal at all and had to fall back to
+    /// reaping silent sessions on a 15-minute timer. The walked chain already contains
+    /// claude.exe, so use that instead whenever $PPID is unusable.
+    /// </summary>
+    private static int LivenessPid(int fromPid, List<ChainEntry> chain)
+    {
+        if (fromPid > 4) return fromPid;
+        var claude = chain.FirstOrDefault(c => c.Name.Equals("claude", StringComparison.OrdinalIgnoreCase));
+        return claude?.Pid ?? 0;
+    }
+
     private static string InternalKind(string? evt) => evt switch
     {
         "SessionStart"      => "busy",
@@ -617,6 +657,31 @@ internal static partial class Program
     }
 
     // ---- 1Hz busy debounce per session --------------------------------------
+
+    /// <summary>
+    /// Is a permission prompt outstanding for this session? Raised by PermissionRequest /
+    /// Notification, lowered by the PostToolUse that answers it or by the end of the turn.
+    /// Unknown session or unreadable flag answers true, so an error can only cost us the
+    /// trim, never the prompt-answered signal.
+    /// </summary>
+    private static bool HasPendingAsk(string? sessionId)
+    {
+        if (string.IsNullOrEmpty(sessionId)) return true;
+        try { return File.Exists(Path.Combine(CacheDir, $"ask-{sessionId}.flag")); }
+        catch { return true; }
+    }
+
+    private static void SetPendingAsk(string? sessionId, bool pending)
+    {
+        if (string.IsNullOrEmpty(sessionId)) return;
+        try
+        {
+            string path = Path.Combine(CacheDir, $"ask-{sessionId}.flag");
+            if (pending) File.WriteAllText(path, "");
+            else File.Delete(path);
+        }
+        catch { }
+    }
 
     private static bool IsBusyDebounced(string? sessionId)
     {

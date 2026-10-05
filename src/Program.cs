@@ -25,22 +25,25 @@ internal static partial class Program
         Assembly.GetExecutingAssembly()
             .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
             ?.InformationalVersion ?? "unstamped";
-    private static readonly long LogRotateBytes = 512 * 1024;   // 512KB cap; older entries discarded.
+    // Timing bugs get noticed hours later, so keep 4-8h: roll to .1 once the file is 4h old.
+    private static readonly TimeSpan LogMaxAge = TimeSpan.FromHours(4);
     private static readonly Stopwatch RunClock = Stopwatch.StartNew();
 
     private static void Log(string msg)
     {
         try
         {
-            // Cheap rotation: when file crosses cap, truncate and start over.
-            // We don't keep history — diagnostics for the last few minutes is the goal.
-            if (File.Exists(LogPath))
+            var fi = new FileInfo(LogPath);
+            bool rotated = false;
+            if (fi.Exists && DateTime.UtcNow - fi.CreationTimeUtc >= LogMaxAge)
             {
-                var fi = new FileInfo(LogPath);
-                if (fi.Length > LogRotateBytes) File.WriteAllText(LogPath, "");
+                File.Move(LogPath, LogPath + ".1", overwrite: true);
+                rotated = true;
             }
             File.AppendAllText(LogPath,
                 $"{DateTime.UtcNow:HH:mm:ss.fff} pid={Environment.ProcessId,5} +{RunClock.ElapsedMilliseconds,5}ms  {msg}\n");
+            // Windows tunneling hands a re-created name the old file's creation time for ~15s.
+            if (rotated) File.SetCreationTimeUtc(LogPath, DateTime.UtcNow);
         }
         catch { }
     }
@@ -51,23 +54,23 @@ internal static partial class Program
             "ClaudeHook — bridges Claude Code hook events to DesktopNames (and Windows toasts as fallback).\n" +
             "\n" +
             "Typical use: double-click the exe. With no arguments and no stdin redirection, it\n" +
-            "self-installs (generates claude-alert.sh, wires the 5 hooks into ~/.claude/settings.json,\n" +
+            "self-installs (wires the hooks, exec form, into ~/.claude/settings.json,\n" +
             "registers Windows autostart) and pops a toast with the result.\n" +
             "\n" +
             "Other entry points:\n" +
             "  ClaudeHook.exe --install             Same as double-click. Useful from scripts.\n" +
             "  ClaudeHook.exe --healthcheck         Verify install, show a toast, exit. Runs from\n" +
             "                                       the autostart Run key at every Windows login.\n" +
-            "  ClaudeHook.exe --from-pid <pid>      Hook path. Stdin = hook JSON. <pid> is the\n" +
-            "                                       caller's parent (claude.exe). Called by the\n" +
-            "                                       generated claude-alert.sh — not by humans.\n" +
+            "  ClaudeHook.exe [--from-pid <pid>]    Hook path. Stdin = hook JSON. Run by Claude\n" +
+            "                                       Code as an exec-form hook (no shell); the\n" +
+            "                                       walk starts at our own parent (claude.exe).\n" +
             "                                       Optional: --notification-kind <permission_prompt|\n" +
             "                                       idle_prompt|auth_success> to pass the Notification\n" +
             "                                       matcher subtype.\n" +
             "  ClaudeHook.exe --help                Show this message.\n" +
             "\n" +
             "Hook JSON expected on stdin: { \"hook_event_name\": \"Stop\", \"session_id\": \"...\", \"cwd\": \"...\" }.\n" +
-            "Log: %TEMP%\\claude-alert\\claudehook.log (rotates at 512KB).");
+            "Log: %TEMP%\\claude-alert\\claudehook.log (rolls to .1 every 4h).");
     }
 
     private static int Main(string[] args)

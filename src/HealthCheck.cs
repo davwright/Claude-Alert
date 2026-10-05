@@ -16,7 +16,7 @@ internal static class HealthCheck
     // closing the gap where Bash/Edit/etc would block on user without firing Notification.
     private static readonly string[] AlertEvents =
     {
-        "SessionStart", "UserPromptSubmit", "PreToolUse",
+        "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
         "PermissionRequest",
         "Notification",
         "Stop", "StopFailure", "SessionEnd",
@@ -27,14 +27,9 @@ internal static class HealthCheck
         var report = new StringBuilder();
         bool allGood = true;
 
-        // 1. Companion .sh next to the exe.
         string exePath = Environment.ProcessPath ?? "";
-        string exeDir  = Path.GetDirectoryName(exePath) ?? "";
-        string shPath  = Path.Combine(exeDir, "claude-alert.sh");
-        if (File.Exists(shPath)) report.AppendLine("[ok] claude-alert.sh present");
-        else { allGood = false; report.AppendLine("[fail] claude-alert.sh missing — run --install"); }
 
-        // 2. Five hooks wired in settings.json.
+        // Hooks wired in settings.json, running this exe directly.
         string settingsPath = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
             ".claude", "settings.json");
@@ -45,10 +40,9 @@ internal static class HealthCheck
             {
                 var root = JsonNode.Parse(File.ReadAllText(settingsPath)) as JsonObject;
                 var hooks = root?["hooks"] as JsonObject;
-                string shBash = shPath.Replace('\\', '/');
                 foreach (string evt in AlertEvents)
                 {
-                    if (HasShCommand(hooks?[evt] as JsonArray, shBash)) wired++;
+                    if (HasExeCommand(hooks?[evt] as JsonArray, exePath)) wired++;
                     else missingEvents++;
                 }
             }
@@ -87,10 +81,8 @@ internal static class HealthCheck
         return allGood ? 0 : 1;
     }
 
-    private static bool HasShCommand(JsonArray? evtArr, string shBash)
+    private static bool HasExeCommand(JsonArray? evtArr, string exePath)
     {
-        // Commands may include extra args (e.g. "...sh --notification-kind permission_prompt")
-        // so we check StartsWith rather than exact equality.
         if (evtArr == null) return false;
         foreach (var group in evtArr)
         {
@@ -99,7 +91,7 @@ internal static class HealthCheck
             foreach (var item in groupHooks)
             {
                 if (item is JsonObject h &&
-                    (h["command"]?.GetValue<string>() ?? "").StartsWith(shBash, StringComparison.OrdinalIgnoreCase))
+                    (h["command"]?.GetValue<string>() ?? "").Equals(exePath, StringComparison.OrdinalIgnoreCase))
                     return true;
             }
         }

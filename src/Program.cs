@@ -112,6 +112,15 @@ internal static partial class Program
             var hook = ReadHookJsonFromStdin();
             if (hook == null) { Log("EXIT no-stdin"); return 0; }
 
+            // Walk the parent chain. Returns the full chain + an outcome label so
+            // DesktopNames knows whether to trust vscodePid or fall back to other
+            // resolution strategies (cwd lookup, etc.). Done before the filters below
+            // because the heartbeat reports every event, subagent and debounced ones too.
+            var walk = WalkChain(hook.SessionId, fromPid);
+            if (vscodePid == 0) vscodePid = walk.VsCodePid;
+            try { WriteHeartbeat(hook, LivenessPid(fromPid, walk.Chain), vscodePid); }
+            catch (Exception ex) { Log($"  heartbeat write failed: {ex.Message}"); }
+
             // InternalKind is ClaudeHook-side only: drives the busy debounce and the
             // balloon-fallback decision when the pipe is down. NOT sent to DN — DN keys
             // off `hookEvent` and decides colour itself.
@@ -159,12 +168,6 @@ internal static partial class Program
             if (internalKind == "asking") SetPendingAsk(hook.SessionId, true);
             else if (hook.HookEventName is "PostToolUse" or "Stop" or "StopFailure" or "SessionEnd")
                 SetPendingAsk(hook.SessionId, false);
-
-            // Walk the parent chain. Returns the full chain + an outcome label so
-            // DesktopNames knows whether to trust vscodePid or fall back to other
-            // resolution strategies (cwd lookup, etc.).
-            var walk = WalkChain(hook.SessionId, fromPid);
-            if (vscodePid == 0) vscodePid = walk.VsCodePid;
 
             // For Stop, peek the transcript to find the assistant's last text. Lets DN
             // colour "Stop ending with a question" differently from "clean Stop". On

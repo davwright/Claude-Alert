@@ -29,7 +29,6 @@ internal static class Install
         string exePath  = Environment.ProcessPath ?? throw new InvalidOperationException("ProcessPath null");
         string exeDir   = Path.GetDirectoryName(exePath)!;
         string shPath   = Path.Combine(exeDir, "claude-alert.sh");
-        string shBash   = shPath.Replace('\\', '/');
 
         var report = new System.Text.StringBuilder();
         bool allGood = true;
@@ -44,7 +43,7 @@ internal static class Install
         Console.WriteLine($"ClaudeHook install");
         Console.WriteLine($"  exe : {exePath}");
 
-        try { addedHooks = WireHooks(exePath, shBash); Step(true, $"{Subscriptions.Length} hook subscriptions wired", ""); }
+        try { addedHooks = WireHooks(exePath); Step(true, $"{Subscriptions.Length} hook subscriptions wired", ""); }
         catch (Exception ex) { Step(false, "", $"wiring hooks: {ex.Message}"); }
 
         try { File.Delete(shPath); Step(true, "claude-alert.sh removed", ""); }
@@ -101,7 +100,7 @@ internal static class Install
         new("SessionEnd",        "*",                 null, 5),
     };
 
-    private static int WireHooks(string exePath, string legacyShBash)
+    private static int WireHooks(string exePath)
     {
         string settingsPath = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
@@ -129,7 +128,7 @@ internal static class Install
             obj["hooks"] = hooks;
         }
 
-        // Sweep all our event keys and remove any existing claude-alert.sh entries
+        // Sweep all our event keys and remove any existing entries of ours
         // before we re-add. This migrates users from old subscription shapes (the
         // pre-StopFailure layout had no UserPromptSubmit and a single Notification
         // matcher=*; that would now collide with the new per-subtype entries).
@@ -144,7 +143,7 @@ internal static class Install
                 if (group["hooks"] is not JsonArray groupHooks) continue;
                 for (int j = groupHooks.Count - 1; j >= 0; j--)
                 {
-                    if (groupHooks[j] is JsonObject h && IsOurHook(h, exePath, legacyShBash))
+                    if (groupHooks[j] is JsonObject h && IsOurHook(h, exePath))
                         groupHooks.RemoveAt(j);
                 }
                 // Drop the group entirely if we emptied it.
@@ -208,12 +207,14 @@ internal static class Install
         return added;
     }
 
-    /// <summary>True iff this hook entry was installed by us: the exe itself, or the old bash wrapper.</summary>
-    private static bool IsOurHook(JsonObject h, string exePath, string legacyShBash)
+    /// <summary>True iff this hook entry is ours: the exe itself, or one of the bash scripts it
+    /// replaced (the claude-alert.sh wrapper, DevPulse's claude-heartbeat.sh).</summary>
+    private static bool IsOurHook(JsonObject h, string exePath)
     {
         string cmd = h["command"]?.GetValue<string>() ?? "";
         return cmd.Equals(exePath, StringComparison.OrdinalIgnoreCase)
-            || cmd.StartsWith(legacyShBash, StringComparison.OrdinalIgnoreCase);
+            || cmd.Contains("Claude-Alert/release/claude-alert.sh", StringComparison.OrdinalIgnoreCase)
+            || cmd.Contains("Claude-Alert/claude-heartbeat.sh", StringComparison.OrdinalIgnoreCase);
     }
 
     // ---- Windows autostart -------------------------------------------------

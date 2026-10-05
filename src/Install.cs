@@ -201,8 +201,10 @@ internal static class Install
             added++;
         }
 
-        var opts = new JsonSerializerOptions { WriteIndented = true };
-        File.WriteAllText(settingsPath, root.ToJsonString(opts));
+        // Utf8JsonWriter, not ToJsonString(options): reflection serialization is off in this build.
+        using (var fs = File.Create(settingsPath))
+        using (var w = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = true, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }))
+            root.WriteTo(w);
         return added;
     }
 

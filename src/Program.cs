@@ -59,6 +59,8 @@ internal static partial class Program
             "\n" +
             "Other entry points:\n" +
             "  ClaudeHook.exe --install             Same as double-click. Useful from scripts.\n" +
+            "  ClaudeHook.exe --lint-hooks [cwd]    List hooks that run through a shell (user, project,\n" +
+            "                                       enabled plugins). Exit 1 if any. Also runs at SessionStart.\n" +
             "  ClaudeHook.exe --healthcheck         Verify install, show a toast, exit. Runs from\n" +
             "                                       the autostart Run key at every Windows login.\n" +
             "  ClaudeHook.exe [--from-pid <pid>]    Hook path. Stdin = hook JSON. Run by Claude\n" +
@@ -80,6 +82,12 @@ internal static partial class Program
         {
             if (args[i] == "--install")     return Install.RunWithToast();
             if (args[i] == "--healthcheck") return HealthCheck.Run();
+            if (args[i] == "--lint-hooks")
+            {
+                var found = HookLint.Find(i + 1 < args.Length ? args[i + 1] : Environment.CurrentDirectory);
+                Console.WriteLine(found.Count == 0 ? "ok: every hook runs in exec form" : HookLint.Summary(found));
+                return found.Count == 0 ? 0 : 1;
+            }
             if (args[i] == "--help" || args[i] == "-h") { PrintHelp(); return 0; }
         }
 
@@ -265,6 +273,15 @@ internal static partial class Program
             // audit JSON. This is what tells us "did we have enough information
             // to resolve this hook, and if not, what was missing?"
             try { EmitIdentitySnapshot(hook, walk, vscodePid, fromPid, reply); } catch { }
+
+            // After the pipe send, so the toast's 4s doesn't delay DN's SessionStart.
+            if (hook.HookEventName == "SessionStart")
+            {
+                var shellHooks = HookLint.Find(hook.Cwd);
+                Log($"  hook lint: {shellHooks.Count} shell-form hook(s)");
+                if (shellHooks.Count > 0)
+                    ShowBalloonExternal("asking", "Slow shell hooks", HookLint.Summary(shellHooks), 10000);
+            }
 
             if (reply.Ok) { Log("EXIT pipe-ok"); return 0; }
 

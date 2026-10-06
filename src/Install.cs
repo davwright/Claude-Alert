@@ -97,6 +97,7 @@ internal static class Install
         new("Notification",      "auth_success",      "--notification-kind auth_success",       5),
         new("Stop",              "*",                 null, 10),
         new("StopFailure",       "*",                 null, 10),
+        new("SubagentStop",      "*",                 null, 5),    // a background agent finished (flyout)
         new("SessionEnd",        "*",                 null, 5),
     };
 

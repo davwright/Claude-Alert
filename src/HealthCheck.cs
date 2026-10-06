@@ -19,7 +19,7 @@ internal static class HealthCheck
         "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
         "PermissionRequest",
         "Notification",
-        "Stop", "StopFailure", "SessionEnd",
+        "Stop", "StopFailure", "SubagentStop", "SessionEnd",
     };
 
     public static int Run()

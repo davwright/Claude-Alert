@@ -145,11 +145,12 @@ internal static partial class Program
             }
 
             // A subagent tool call (agent_id present) is the parent's own work seen from the
-            // inside: the parent already went busy firing PreToolUse for the Agent tool, so
-            // re-announcing every nested call only churns the desktop colour. Anything the
-            // user actually has to answer (PermissionRequest / Notification -> "asking")
-            // still gets through, whoever asked.
-            if (!string.IsNullOrEmpty(hook.AgentId) && internalKind == "busy")
+            // inside. Its PreToolUse goes to DN tagged with the agent, which lists it in the
+            // flyout ("⏳ 2 agents: ...") without touching the desktop colour; its other busy
+            // events add nothing there and are dropped. Anything the user actually has to answer
+            // (PermissionRequest / Notification -> "asking") still gets through, whoever asked.
+            bool isAgent = !string.IsNullOrEmpty(hook.AgentId);
+            if (isAgent && internalKind == "busy" && hook.HookEventName != "PreToolUse")
             {
                 Log($"EXIT subagent busy event (agent={hook.AgentType}/{hook.AgentId})");
                 return 0;
@@ -164,7 +165,9 @@ internal static partial class Program
             // Monitor PostToolUse that arms liveness further down.
             bool exemptFromDebounce = hook.HookEventName == "PostToolUse"
                                       && (hook.ToolName == "Monitor" || HasPendingAsk(hook.SessionId));
-            if (internalKind == "busy" && !exemptFromDebounce && IsBusyDebounced(hook.SessionId))
+            // Agents skip it: sharing the session's stamp would let their calls swallow the main
+            // thread's events, and the flyout wants each agent's latest call.
+            if (internalKind == "busy" && !isAgent && !exemptFromDebounce && IsBusyDebounced(hook.SessionId))
             {
                 Log("EXIT busy-debounced");
                 return 0;
@@ -253,6 +256,8 @@ internal static partial class Program
                 ToolDescription  = toolDescription,
                 Message          = hook.Message,
                 NotificationKind = notificationKind,
+                AgentId          = hook.AgentId,
+                AgentType        = hook.AgentType,
                 ErrorType        = hook.ErrorType ?? hook.Error ?? hook.Reason,
                 VsCodePid        = vscodePid,
                 SessionPid       = Environment.ProcessId,
@@ -403,6 +408,7 @@ internal static partial class Program
         "Notification"      => "asking",  // both permission_prompt and idle_prompt — user is being waited on
         "Stop"              => "ready",
         "StopFailure"       => "ready",   // turn ended (with an error); colour is DN's call
+        "SubagentStop"      => "agent-stop", // a background agent finished: DN drops it from the flyout
         "SessionEnd"        => "idle",
         _                   => "",
     };
@@ -763,7 +769,9 @@ internal static partial class Program
         [JsonPropertyName("toolDescription")]  public string? ToolDescription { get; set; } // PreToolUse: human-readable tool action (e.g. "Grep \"pattern\"")
         [JsonPropertyName("message")]          public string? Message { get; set; }
         [JsonPropertyName("notificationKind")] public string? NotificationKind { get; set; } // permission_prompt | idle_prompt | auth_success
-        [JsonPropertyName("errorType")]        public string? ErrorType { get; set; }        // StopFailure: rate_limit | authentication_failed | billing_error | ...
+        [JsonPropertyName("errorType")]        public string? ErrorType { get; set; }
+        [JsonPropertyName("agentId")]          public string? AgentId { get; set; }          // set when a background agent fired the hook
+        [JsonPropertyName("agentType")]        public string? AgentType { get; set; }        // StopFailure: rate_limit | authentication_failed | billing_error | ...
 
         // Stop only: peek of Claude's last assistant text so DN can colour-distinguish
         // "Claude finished" from "Claude finished AND ended with a question". Populated by

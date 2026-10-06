@@ -11,4 +11,4 @@ On this machine Git Bash takes ~1.5s to start idle and 5-12s under load (about 6
 
 ## Tests before deploy
 
-`node tests/heartbeat.test.mjs` and `node tests/hooklint.test.mjs` against the build, then `publish.ps1`, then `release\ClaudeHook.exe --install`.
+`node tests/heartbeat.test.mjs`, `node tests/hooklint.test.mjs` and `node tests/agents.test.mjs` (needs DN running) against the build, then `publish.ps1`, then `release\ClaudeHook.exe --install`.

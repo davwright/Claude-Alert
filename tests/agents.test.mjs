@@ -13,7 +13,11 @@ const logLines = () => readFileSync(dnLog, "utf8").split("\n").filter(l => l.inc
 
 const checks = [];
 send({ hook_event_name: "UserPromptSubmit" });
-send({ hook_event_name: "Stop", background_tasks: [{ id: agent, type: "subagent", status: "running" }] });
+const stopAt = logLines().length;
+send({ hook_event_name: "Stop", background_tasks: [
+  { id: agent, type: "subagent", status: "running", description: "Runbook" },
+  { id: "b1", type: "shell", status: "running", description: "Serve on localhost" }] });
+checks.push(["Stop forwards its background task list", logLines().slice(stopAt).some(l => l.includes("hook=Stop") && l.includes(" bg=2"))]);
 const before = logLines().length;
 send({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command: "ls", description: "List files" }, agent_id: agent, agent_type: "general-purpose" });
 send({ hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command: "ls" }, agent_id: agent, agent_type: "general-purpose" });

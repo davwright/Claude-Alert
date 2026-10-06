@@ -198,6 +198,7 @@ internal static partial class Program
             bool? endsWithQuestion = null;
             string? messageTail = null;
             bool backgroundActive = false;
+            var backgroundTasks = new List<BackgroundTaskOut>();
             if (hook.HookEventName == "Stop")
             {
                 var peek = TranscriptPeek.Read(hook.TranscriptPath);
@@ -215,11 +216,20 @@ internal static partial class Program
                 // FileMissing / NoAssistant: silently send a plain Stop with null fields.
 
                 // Is the turn "finished" but with work still running? Two sources:
-                //   1. background_tasks in the payload — run_in_background Bash shells (deterministic).
+                //   1. background_tasks in the payload — run_in_background shells and background
+                //      agents (deterministic). Forwarded so DN's hover can list them.
                 //   2. a live Monitor watcher in the transcript — not in the payload (see HasLiveMonitor).
-                // Either means DN should keep the desktop orange (working), not green (done).
+                // Either means DN shows the turn as done but still working (green ⏳).
                 bool bashBackground = hook.BackgroundTasks is { ValueKind: JsonValueKind.Array } bt
                                       && bt.GetArrayLength() > 0;
+                if (bashBackground)
+                    foreach (var t in hook.BackgroundTasks!.Value.EnumerateArray())
+                        backgroundTasks.Add(new BackgroundTaskOut
+                        {
+                            Id          = t.TryGetProperty("id", out var id) ? id.GetString() ?? "" : "",
+                            Type        = t.TryGetProperty("type", out var ty) ? ty.GetString() ?? "" : "",
+                            Description = t.TryGetProperty("description", out var d) ? d.GetString() ?? "" : "",
+                        });
                 bool liveMonitor = TranscriptPeek.HasLiveMonitor(CacheDir, hook.SessionId, hook.TranscriptPath);
                 backgroundActive = bashBackground || liveMonitor;
                 if (backgroundActive)
@@ -267,6 +277,7 @@ internal static partial class Program
                 LastMessageEndsWithQuestion = endsWithQuestion,
                 LastMessageTail             = messageTail,
                 BackgroundActive            = backgroundActive,
+                BackgroundTasks             = backgroundTasks,
             };
 
             string outboundJson = JsonSerializer.Serialize(payload);
@@ -783,6 +794,8 @@ internal static partial class Program
         // Monitor watcher, or a run_in_background Bash shell. DN colours such a Stop orange
         // (working) instead of green (done). See DESKTOPNAMES-INTEGRATION.md.
         [JsonPropertyName("backgroundActive")]             public bool BackgroundActive { get; set; }
+        // Stop only: the background_tasks Claude Code listed (shells, agents), for DN's hover.
+        [JsonPropertyName("backgroundTasks")]              public List<BackgroundTaskOut> BackgroundTasks { get; set; } = new();
 
         // --- process tree (everything we know; DN matches however it wants) ---
         [JsonPropertyName("vscodePid")]      public int                  VsCodePid { get; set; }    // first Code/Cursor in chain, or 0
@@ -793,6 +806,13 @@ internal static partial class Program
     }
 
     /// <summary>One entry in the parent-process chain. DN can match by any name.</summary>
+    internal sealed class BackgroundTaskOut
+    {
+        [JsonPropertyName("id")]          public string Id { get; set; } = "";            // agent id for subagents
+        [JsonPropertyName("type")]        public string Type { get; set; } = "";          // shell | subagent | ...
+        [JsonPropertyName("description")] public string Description { get; set; } = "";
+    }
+
     internal sealed class ChainEntry
     {
         [JsonPropertyName("pid")]  public int    Pid { get; set; }

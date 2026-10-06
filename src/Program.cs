@@ -229,6 +229,7 @@ internal static partial class Program
                             Id          = t.TryGetProperty("id", out var id) ? id.GetString() ?? "" : "",
                             Type        = t.TryGetProperty("type", out var ty) ? ty.GetString() ?? "" : "",
                             Description = t.TryGetProperty("description", out var d) ? d.GetString() ?? "" : "",
+                            StartedUtc  = TaskStartedUtc(hook.ScratchpadDir, t.TryGetProperty("id", out var tid) ? tid.GetString() : null),
                         });
                 bool liveMonitor = TranscriptPeek.HasLiveMonitor(CacheDir, hook.SessionId, hook.TranscriptPath);
                 backgroundActive = bashBackground || liveMonitor;
@@ -342,6 +343,7 @@ internal static partial class Program
         [JsonPropertyName("source")]          public string? Source { get; set; }   // SessionStart: startup/resume/clear
         [JsonPropertyName("agent_id")]        public string? AgentId { get; set; }   // set only on hooks fired from inside a subagent
         [JsonPropertyName("agent_type")]      public string? AgentType { get; set; } // e.g. "general-purpose", "Explore"
+        [JsonPropertyName("scratchpad_dir")]  public string? ScratchpadDir { get; set; } // <temp>/claude/<project>/<session>/scratchpad
         [JsonPropertyName("tool_input")]      public JsonElement? ToolInput { get; set; }  // PreToolUse: raw tool input JSON
         [JsonPropertyName("tool_response")]   public JsonElement? ToolResponse { get; set; } // PostToolUse: what the tool returned
 
@@ -435,6 +437,20 @@ internal static partial class Program
     /// Body text for the fallback Windows balloon (only fired when DN is unreachable).
     /// `kind` is the InternalKind classifier — NOT on the wire — driving toast text only.
     /// </summary>
+    /// <summary>
+    /// When a background task started. Claude Code doesn't report it, but it creates the task's
+    /// output file, <c>&lt;session dir&gt;/tasks/&lt;id&gt;.output</c>, at launch (a server running
+    /// since yesterday has yesterday's file); the session dir is the scratchpad's parent. Null
+    /// when the file isn't there: DN then shows no run time rather than a guessed one.
+    /// </summary>
+    private static DateTime? TaskStartedUtc(string? scratchpadDir, string? taskId)
+    {
+        if (string.IsNullOrEmpty(scratchpadDir) || string.IsNullOrEmpty(taskId)) return null;
+        string file = Path.Combine(Path.GetDirectoryName(scratchpadDir.TrimEnd('/', '\\'))!, "tasks", taskId + ".output");
+        if (!File.Exists(file)) { Log($"  task file missing: {file}"); return null; }
+        return File.GetCreationTimeUtc(file);
+    }
+
     private static string BuildBody(string kind, HookInput hook)
     {
         if (kind == "busy")
@@ -805,14 +821,16 @@ internal static partial class Program
         [JsonPropertyName("walkOutcome")]    public string               WalkOutcome { get; set; } = "";
     }
 
-    /// <summary>One entry in the parent-process chain. DN can match by any name.</summary>
+    /// <summary>One running background task from the Stop payload, for DN's hover.</summary>
     internal sealed class BackgroundTaskOut
     {
         [JsonPropertyName("id")]          public string Id { get; set; } = "";            // agent id for subagents
         [JsonPropertyName("type")]        public string Type { get; set; } = "";          // shell | subagent | ...
         [JsonPropertyName("description")] public string Description { get; set; } = "";
+        [JsonPropertyName("startedUtc")]  public DateTime? StartedUtc { get; set; }       // null when its output file is missing
     }
 
+    /// <summary>One entry in the parent-process chain. DN can match by any name.</summary>
     internal sealed class ChainEntry
     {
         [JsonPropertyName("pid")]  public int    Pid { get; set; }

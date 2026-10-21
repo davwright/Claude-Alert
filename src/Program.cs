@@ -265,6 +265,7 @@ internal static partial class Program
                 HookSource       = hook.Source,
                 ToolName         = hook.ToolName,
                 ToolDescription  = toolDescription,
+                SendTo           = hook.HookEventName == "PreToolUse" ? SendTo(hook) : null,
                 Message          = hook.Message,
                 NotificationKind = notificationKind,
                 AgentId          = hook.AgentId,
@@ -479,6 +480,11 @@ internal static partial class Program
     /// Bash uses the user-provided `description` field; others extract the most identifying
     /// parameter (filename or pattern). Long values are truncated at word boundaries.
     /// </summary>
+    /// <summary>SendMessage's recipient: another session's name or a subagent's id.</summary>
+    private static string? SendTo(HookInput hook) =>
+        hook.ToolName == "SendMessage" && hook.ToolInput is { } input
+        && input.TryGetProperty("to", out var to) && to.ValueKind == JsonValueKind.String ? to.GetString() : null;
+
     private static string? BuildToolDescription(HookInput hook)
     {
         if (string.IsNullOrEmpty(hook.ToolName) || hook.ToolInput == null)
@@ -496,6 +502,14 @@ internal static partial class Program
                     return string.IsNullOrEmpty(descStr) ? null : TranscriptPeek.HeadOf(descStr, 100);
                 }
                 return null;
+            }
+
+            // SendMessage: "Message evolxcli-67: <summary>" — another session (or a subagent) by name.
+            if (hook.ToolName == "SendMessage")
+            {
+                string to = SendTo(hook) ?? "";
+                string summary = hook.ToolInput.Value.TryGetProperty("summary", out var s) && s.ValueKind == JsonValueKind.String ? s.GetString() ?? "" : "";
+                return to.Length == 0 ? null : TranscriptPeek.HeadOf(summary.Length > 0 ? $"Message {to}: {summary}" : $"Message {to}", 100);
             }
 
             // Read: format as "Read {filename}"
@@ -799,6 +813,7 @@ internal static partial class Program
         [JsonPropertyName("errorType")]        public string? ErrorType { get; set; }
         [JsonPropertyName("agentId")]          public string? AgentId { get; set; }          // set when a background agent fired the hook
         [JsonPropertyName("agentType")]        public string? AgentType { get; set; }        // StopFailure: rate_limit | authentication_failed | billing_error | ...
+        [JsonPropertyName("sendTo")]           public string? SendTo { get; set; }           // PreToolUse SendMessage: the recipient's session name or subagent id
 
         // Stop only: peek of Claude's last assistant text so DN can colour-distinguish
         // "Claude finished" from "Claude finished AND ended with a question". Populated by

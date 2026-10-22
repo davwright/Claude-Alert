@@ -229,6 +229,7 @@ internal static partial class Program
                             Id          = t.TryGetProperty("id", out var id) ? id.GetString() ?? "" : "",
                             Type        = t.TryGetProperty("type", out var ty) ? ty.GetString() ?? "" : "",
                             Description = t.TryGetProperty("description", out var d) ? d.GetString() ?? "" : "",
+                            Command     = t.TryGetProperty("command", out var c) ? c.GetString() : null,
                             StartedUtc  = TaskStartedUtc(hook.ScratchpadDir, t.TryGetProperty("id", out var tid) ? tid.GetString() : null),
                         });
                 bool liveMonitor = TranscriptPeek.HasLiveMonitor(CacheDir, hook.SessionId, hook.TranscriptPath);
@@ -842,6 +843,7 @@ internal static partial class Program
         [JsonPropertyName("id")]          public string Id { get; set; } = "";            // agent id for subagents
         [JsonPropertyName("type")]        public string Type { get; set; } = "";          // shell | subagent | ...
         [JsonPropertyName("description")] public string Description { get; set; } = "";
+        [JsonPropertyName("command")]     public string? Command { get; set; }            // shells: the command; DN finds its bash process by it
         [JsonPropertyName("startedUtc")]  public DateTime? StartedUtc { get; set; }       // null when its output file is missing
     }
 

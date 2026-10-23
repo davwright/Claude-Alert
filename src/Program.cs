@@ -425,7 +425,9 @@ internal static partial class Program
         "StopFailure"       => "ready",   // turn ended (with an error); colour is DN's call
         "SubagentStop"      => "agent-stop", // a background agent finished: DN drops it from the flyout
         "SessionEnd"        => "idle",
-        _                   => "",
+        "PreCompact"        => "compact", // not busy: the busy debounce must not drop it
+        "PostCompact"       => "compact",
+        _                  => "",
     };
 
     private static string BuildTitle(string? cwd)
@@ -472,6 +474,9 @@ internal static partial class Program
             }
             return "Ready";
         }
+
+        if (kind == "compact")
+            return hook.HookEventName == "PreCompact" ? "Compacting the conversation" : "Compacted the conversation";
 
         return "";   // idle and unknown
     }

@@ -498,8 +498,8 @@ internal static partial class Program
 
         try
         {
-            // Bash: user-written description is the best text.
-            if (hook.ToolName == "Bash")
+            // Bash and PowerShell: the user-written description is the best text.
+            if (hook.ToolName is "Bash" or "PowerShell")
             {
                 if (hook.ToolInput.Value.TryGetProperty("description", out var desc) &&
                     desc.ValueKind == JsonValueKind.String)

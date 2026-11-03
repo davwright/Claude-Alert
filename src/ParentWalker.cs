@@ -49,7 +49,11 @@ internal static partial class Program
             try
             {
                 var cached = JsonSerializer.Deserialize<WalkCacheEntry>(File.ReadAllText(cachePath));
-                if (cached != null && cached.VsCodePid > 4 && IsAlive(cached.VsCodePid))
+                // A resumed session keeps its id under a new claude.exe in the same VS Code:
+                // the cached chain's claude pid is then dead and DN reaps the session on it.
+                var cachedClaude = cached?.Chain.FirstOrDefault(c => c.Name.Equals("claude", StringComparison.OrdinalIgnoreCase));
+                if (cached != null && cached.VsCodePid > 4 && IsAlive(cached.VsCodePid)
+                    && (cachedClaude == null || IsAlive(cachedClaude.Pid)))
                 {
                     Log($"  walk cache hit: vscodePid={cached.VsCodePid}, chain has {cached.Chain.Count} entries");
                     return new WalkResult

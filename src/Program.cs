@@ -267,6 +267,7 @@ internal static partial class Program
                 ToolName         = hook.ToolName,
                 ToolDescription  = toolDescription,
                 SendTo           = hook.HookEventName == "PreToolUse" ? SendTo(hook) : null,
+                SendBody         = hook.HookEventName == "PreToolUse" ? SendBody(hook) : null,
                 Message          = hook.Message,
                 NotificationKind = notificationKind,
                 AgentId          = hook.AgentId,
@@ -490,6 +491,11 @@ internal static partial class Program
     private static string? SendTo(HookInput hook) =>
         hook.ToolName == "SendMessage" && hook.ToolInput is { } input
         && input.TryGetProperty("to", out var to) && to.ValueKind == JsonValueKind.String ? to.GetString() : null;
+
+    /// <summary>SendMessage's text in full, for DN to show the message: a string, or the raw JSON of a structured message.</summary>
+    private static string? SendBody(HookInput hook) =>
+        hook.ToolName == "SendMessage" && hook.ToolInput is { } input && input.TryGetProperty("message", out var m)
+            ? (m.ValueKind == JsonValueKind.String ? m.GetString() : m.GetRawText()) : null;
 
     private static string? BuildToolDescription(HookInput hook)
     {
@@ -820,6 +826,7 @@ internal static partial class Program
         [JsonPropertyName("agentId")]          public string? AgentId { get; set; }          // set when a background agent fired the hook
         [JsonPropertyName("agentType")]        public string? AgentType { get; set; }        // StopFailure: rate_limit | authentication_failed | billing_error | ...
         [JsonPropertyName("sendTo")]           public string? SendTo { get; set; }           // PreToolUse SendMessage: the recipient's session name or subagent id
+        [JsonPropertyName("sendBody")]         public string? SendBody { get; set; }         // PreToolUse SendMessage: the message text in full
 
         // Stop only: peek of Claude's last assistant text so DN can colour-distinguish
         // "Claude finished" from "Claude finished AND ended with a question". Populated by

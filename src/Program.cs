@@ -268,6 +268,8 @@ internal static partial class Program
                 ToolDescription  = toolDescription,
                 SendTo           = hook.HookEventName == "PreToolUse" ? SendTo(hook) : null,
                 SendBody         = hook.HookEventName == "PreToolUse" ? SendBody(hook) : null,
+                SendFailed       = hook.HookEventName == "PostToolUse" ? SendFailed(hook) : null,
+                SendFailedTo     = hook.HookEventName == "PostToolUse" && SendFailed(hook) != null ? SendTo(hook) : null,
                 Message          = hook.Message,
                 NotificationKind = notificationKind,
                 AgentId          = hook.AgentId,
@@ -496,6 +498,13 @@ internal static partial class Program
     private static string? SendBody(HookInput hook) =>
         hook.ToolName == "SendMessage" && hook.ToolInput is { } input && input.TryGetProperty("message", out var m)
             ? (m.ValueKind == JsonValueKind.String ? m.GetString() : m.GetRawText()) : null;
+
+    /// <summary>Why a SendMessage was not sent (its response says success:false), else null.</summary>
+    private static string? SendFailed(HookInput hook) =>
+        hook.ToolName == "SendMessage" && hook.ToolResponse is { ValueKind: JsonValueKind.Object } r
+        && r.TryGetProperty("success", out var ok) && ok.ValueKind == JsonValueKind.False
+            ? (r.TryGetProperty("display", out var d) ? d.GetString() : r.TryGetProperty("message", out var m) ? m.GetString() : null) ?? "not sent"
+            : null;
 
     private static string? BuildToolDescription(HookInput hook)
     {
@@ -826,6 +835,8 @@ internal static partial class Program
         [JsonPropertyName("agentId")]          public string? AgentId { get; set; }          // set when a background agent fired the hook
         [JsonPropertyName("agentType")]        public string? AgentType { get; set; }        // StopFailure: rate_limit | authentication_failed | billing_error | ...
         [JsonPropertyName("sendTo")]           public string? SendTo { get; set; }           // PreToolUse SendMessage: the recipient's session name or subagent id
+        [JsonPropertyName("sendFailed")]       public string? SendFailed { get; set; }       // PostToolUse SendMessage that failed: why
+        [JsonPropertyName("sendFailedTo")]     public string? SendFailedTo { get; set; }     // ... and the address it was sent to
         [JsonPropertyName("sendBody")]         public string? SendBody { get; set; }         // PreToolUse SendMessage: the message text in full
 
         // Stop only: peek of Claude's last assistant text so DN can colour-distinguish
